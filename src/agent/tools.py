@@ -436,8 +436,8 @@ class ToolRegistry:
         event = {
             "summary": summary,
             "description": description,
-            "start": {"dateTime": start_value, "timeZone": self.settings.timezone},
-            "end": {"dateTime": end_value, "timeZone": self.settings.timezone},
+            "start": {"dateTime": start_value},
+            "end": {"dateTime": end_value},
         }
         try:
             created = service.events().insert(
@@ -770,8 +770,7 @@ class ToolRegistry:
         parsed = self._parse_datetime(value)
         if not parsed:
             return value
-        localized = parsed.astimezone(ZoneInfo(self.settings.timezone))
-        return localized.strftime("%Y-%m-%dT%H:%M:%S")
+        return parsed.astimezone(ZoneInfo(self.settings.timezone)).isoformat()
 
     def _google_docs_service(self, readonly: bool):
         if not self.settings.google_service_account_file:
