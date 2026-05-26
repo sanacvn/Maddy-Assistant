@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from .agent.config import Settings
 from .agent.chain import ChainReminderService
+from .agent.daily_tasks import DailyTaskService
 from .agent.gemini_agent import GeminiTelegramAgent
 from .agent.morning import MorningBriefingService
 from .agent.nagging import DynamicNaggingService
@@ -54,7 +55,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     if update.message:
         await update.message.reply_text(
-            "Agent aktif. Kirim pesan biasa untuk chat, tanya kalender, cari web, atau simpan ke Notion."
+            "Agent aktif. Kirim pesan biasa untuk chat, tanya kalender, baca/tulis Google Docs, cari web, atau simpan ke Notion."
         )
 
 
@@ -94,6 +95,33 @@ async def calendar_check_command(update: Update, context: ContextTypes.DEFAULT_T
                 "Calendar setup bermasalah.\n"
                 f"Error: {result.get('error')}\n"
                 f"Calendar ID: {result.get('calendar_id', '-')}\n"
+                f"Service account: {result.get('service_account_email', '-')}"
+            )
+
+
+async def docs_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    note_user_activity(update, context)
+    logger.info(
+        "Received /docs_check chat_id=%s user_id=%s",
+        update.effective_chat.id if update.effective_chat else None,
+        update.effective_user.id if update.effective_user else None,
+    )
+    agent: GeminiTelegramAgent = context.application.bot_data["agent"]
+    result = await agent.tools.google_docs_check_setup()
+    if update.message:
+        if result.get("ok"):
+            await update.message.reply_text(
+                "Google Docs setup OK.\n"
+                f"Document: {result.get('title')} ({result.get('document_id')})\n"
+                f"Words: {result.get('word_count')}\n"
+                f"Service account: {result.get('service_account_email')}\n"
+                f"Link: {result.get('document_url')}"
+            )
+        else:
+            await update.message.reply_text(
+                "Google Docs setup bermasalah.\n"
+                f"Error: {result.get('error')}\n"
+                f"Document ID: {result.get('document_id', '-')}\n"
                 f"Service account: {result.get('service_account_email', '-')}"
             )
 
@@ -163,6 +191,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(application: Application) -> None:
+    daily_task_service: DailyTaskService = application.bot_data["daily_task_service"]
+    await daily_task_service.start()
     reminder_service: ContextualReminderService = application.bot_data["reminder_service"]
     await reminder_service.start(application)
     nagging_service: DynamicNaggingService = application.bot_data["nagging_service"]
@@ -174,6 +204,8 @@ async def post_init(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
+    daily_task_service: DailyTaskService = application.bot_data["daily_task_service"]
+    await daily_task_service.stop()
     reminder_service: ContextualReminderService = application.bot_data["reminder_service"]
     await reminder_service.stop()
     nagging_service: DynamicNaggingService = application.bot_data["nagging_service"]
@@ -187,6 +219,7 @@ async def post_shutdown(application: Application) -> None:
 def main() -> None:
     settings = Settings.from_env()
     agent = GeminiTelegramAgent(settings)
+    daily_task_service = DailyTaskService(settings, agent.tools)
     reminder_service = ContextualReminderService(settings, agent.tools)
     nagging_service = DynamicNaggingService(settings, agent.tools)
     nl_input_service = NaturalLanguageInputService(settings, agent.tools)
@@ -201,6 +234,7 @@ def main() -> None:
         .build()
     )
     application.bot_data["agent"] = agent
+    application.bot_data["daily_task_service"] = daily_task_service
     application.bot_data["reminder_service"] = reminder_service
     application.bot_data["nagging_service"] = nagging_service
     application.bot_data["nl_input_service"] = nl_input_service
@@ -210,6 +244,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("calendar_check", calendar_check_command))
+    application.add_handler(CommandHandler("docs_check", docs_check_command))
     application.add_handler(CommandHandler("chat_id", chat_id_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(on_error)

@@ -52,6 +52,9 @@ class Settings:
     notion_parent_page_id: str | None
     google_calendar_id: str
     google_service_account_file: str | None
+    google_docs_document_id: str | None
+    google_docs_context_auto_sync: bool
+    google_docs_context_max_chars: int
     timezone: str
     playwright_headless: bool
     reminder_enabled: bool
@@ -88,6 +91,11 @@ class Settings:
     chain_reminder_delay_min_minutes: int
     chain_reminder_delay_max_minutes: int
     chain_reminder_rules: list[dict[str, str]]
+    daily_task_list_enabled: bool
+    daily_task_templates: tuple[str, ...]
+    daily_task_due_hour: int
+    daily_task_due_minute: int
+    local_task_store_file: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,6 +110,14 @@ class Settings:
             if value.strip()
         )
         chain_rules = parse_json_list(os.getenv("CHAIN_REMINDER_RULES"))
+        daily_task_templates = tuple(
+            value.strip()
+            for value in os.getenv(
+                "DAILY_TASK_TEMPLATES",
+                "Duolingo,Hack The Box",
+            ).split(",")
+            if value.strip()
+        )
         return cls(
             telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
             gemini_api_key=os.environ["GEMINI_API_KEY"],
@@ -111,6 +127,16 @@ class Settings:
             notion_parent_page_id=os.getenv("NOTION_PARENT_PAGE_ID"),
             google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "your_calendar@gmail.com"),
             google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
+            google_docs_document_id=os.getenv("GOOGLE_DOCS_DOCUMENT_ID"),
+            google_docs_context_auto_sync=os.getenv(
+                "GOOGLE_DOCS_CONTEXT_AUTO_SYNC",
+                "true",
+            ).lower()
+            == "true",
+            google_docs_context_max_chars=max(
+                1000,
+                min(16000, int(os.getenv("GOOGLE_DOCS_CONTEXT_MAX_CHARS", "6000"))),
+            ),
             timezone=os.getenv("TIMEZONE", "Asia/Jakarta"),
             playwright_headless=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true",
             reminder_enabled=os.getenv("REMINDER_ENABLED", "false").lower() == "true",
@@ -188,4 +214,19 @@ class Settings:
                 int(os.getenv("CHAIN_REMINDER_DELAY_MAX_MINUTES", "5")),
             ),
             chain_reminder_rules=chain_rules,
+            daily_task_list_enabled=os.getenv("DAILY_TASK_LIST_ENABLED", "true").lower()
+            == "true",
+            daily_task_templates=daily_task_templates,
+            daily_task_due_hour=min(
+                23,
+                max(0, int(os.getenv("DAILY_TASK_DUE_HOUR", "20"))),
+            ),
+            daily_task_due_minute=min(
+                59,
+                max(0, int(os.getenv("DAILY_TASK_DUE_MINUTE", "0"))),
+            ),
+            local_task_store_file=os.getenv(
+                "LOCAL_TASK_STORE_FILE",
+                "var/task_list.json",
+            ),
         )

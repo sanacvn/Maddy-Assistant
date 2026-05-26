@@ -13,6 +13,7 @@ from .tools import ToolRegistry
 class ParsedReminderRequest:
     title: str
     scheduled_at: datetime
+    end_at: datetime
     context: str | None
     source_text: str
 
@@ -21,6 +22,7 @@ class ParsedReminderRequest:
 class PendingConfirmation:
     title: str
     scheduled_at: datetime
+    end_at: datetime
     context: str | None
     source_text: str
 
@@ -44,16 +46,20 @@ class NaturalLanguageInputService:
 
         parsed = self._parse_request(text)
         if not parsed:
-            return "Boleh, tapi waktunya masih ambigu. Kasih format yang lebih jelas ya, misalnya `besok jam 15:00` atau `Senin jam 3 sore`."
+            return (
+                "Boleh, tapi waktunya masih ambigu. Kasih format yang lebih jelas ya, "
+                "misalnya `besok jam 15:00`, `besok jam 11-12`, atau `Senin jam 3 sore`."
+            )
 
         self._pending_by_chat[chat_id] = PendingConfirmation(
             title=parsed.title,
             scheduled_at=parsed.scheduled_at,
+            end_at=parsed.end_at,
             context=parsed.context,
             source_text=parsed.source_text,
         )
         return (
-            f"Oke, aku set: {parsed.title} {self._format_confirmation_time(parsed.scheduled_at)}. "
+            f"Oke, aku set: {parsed.title} {self._format_confirmation_time(parsed.scheduled_at, parsed.end_at)}. "
             "Betul ya?"
         )
 
@@ -67,20 +73,17 @@ class NaturalLanguageInputService:
 
         if self._is_positive_reply(lowered):
             self._pending_by_chat.pop(chat_id, None)
-            end_at = pending.scheduled_at + timedelta(
-                minutes=self.settings.calendar_default_event_duration_minutes
-            )
             description = self._build_calendar_description(pending)
             result = await self.tools.calendar_create_event(
                 summary=pending.title,
                 start_iso=pending.scheduled_at.isoformat(),
-                end_iso=end_at.isoformat(),
+                end_iso=pending.end_at.isoformat(),
                 description=description,
             )
             if result.get("error"):
                 return f"Gagal nyimpen ke Google Calendar: {result['error']}"
             return (
-                f"Siap, udah aku simpan: {pending.title} {self._format_confirmation_time(pending.scheduled_at)}."
+                f"Siap, udah aku simpan: {pending.title} {self._format_confirmation_time(pending.scheduled_at, pending.end_at)}."
             )
 
         reparsed = self._parse_request(text)
@@ -88,17 +91,18 @@ class NaturalLanguageInputService:
             self._pending_by_chat[chat_id] = PendingConfirmation(
                 title=reparsed.title,
                 scheduled_at=reparsed.scheduled_at,
+                end_at=reparsed.end_at,
                 context=reparsed.context,
                 source_text=reparsed.source_text,
             )
             return (
-                f"Oke, aku revisi: {reparsed.title} {self._format_confirmation_time(reparsed.scheduled_at)}. "
+                f"Oke, aku revisi: {reparsed.title} {self._format_confirmation_time(reparsed.scheduled_at, reparsed.end_at)}. "
                 "Betul ya?"
             )
 
         return (
             f"Kalau mau lanjut, jawab `iya`. Kalau mau revisi, tulis ulang jadwalnya. "
-            f"Sekarang yang pending: {pending.title} {self._format_confirmation_time(pending.scheduled_at)}."
+            f"Sekarang yang pending: {pending.title} {self._format_confirmation_time(pending.scheduled_at, pending.end_at)}."
         )
 
     def _parse_request(self, text: str) -> ParsedReminderRequest | None:
@@ -113,17 +117,40 @@ class NaturalLanguageInputService:
             return None
 
         scheduled_date, day_phrase, day_end = day_result
-        time_result = self._extract_time(lowered)
+        time_result = self._extract_time_range(lowered)
         if not time_result:
             return None
 
-        hour, minute, time_phrase, time_start, time_end = time_result
-        scheduled_at = scheduled_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        (
+            start_hour,
+            start_minute,
+            end_hour,
+            end_minute,
+            time_phrase,
+            time_start,
+            time_end,
+        ) = time_result
+        scheduled_at = scheduled_date.replace(
+            hour=start_hour,
+            minute=start_minute,
+            second=0,
+            microsecond=0,
+        )
+        end_at = scheduled_date.replace(
+            hour=end_hour,
+            minute=end_minute,
+            second=0,
+            microsecond=0,
+        )
+        if end_at <= scheduled_at:
+            end_at += timedelta(days=1)
         if scheduled_at <= now:
             if day_phrase in {"hari ini", "today"}:
                 return None
             if day_phrase == "malam ini" and scheduled_at <= now:
                 return None
+        if end_at <= scheduled_at:
+            return None
 
         title, context = self._extract_title_and_context(raw, lowered, day_end, time_start, time_end)
         if not title:
@@ -132,6 +159,7 @@ class NaturalLanguageInputService:
         return ParsedReminderRequest(
             title=title,
             scheduled_at=scheduled_at,
+            end_at=end_at,
             context=context,
             source_text=raw,
         )
@@ -147,6 +175,16 @@ class NaturalLanguageInputService:
             "schedule",
             "pasang reminder",
             "buat reminder",
+            "buat event",
+            "bikin event",
+            "tambahin ke kalender",
+            "tambahin ke calendar",
+            "masukin ke kalender",
+            "masukin ke calendar",
+            "masukkan ke kalender",
+            "masukkan ke calendar",
+            "calendar-in",
+            "kalenderin",
         )
         return any(trigger in lowered for trigger in triggers)
 
@@ -234,39 +272,129 @@ class NaturalLanguageInputService:
                 return None
         return scheduled, date_match.group(0), date_match.end()
 
-    @staticmethod
-    def _extract_time(text: str) -> tuple[int, int, str, int, int] | None:
+    def _extract_time_range(
+        self,
+        text: str,
+    ) -> tuple[int, int, int, int, str, int, int] | None:
+        range_patterns = [
+            (
+                r"\b(?:(?:jam|pukul)\s*)?"
+                r"(?P<start_hour>\d{1,2})(?:[:.](?P<start_minute>\d{2}))?"
+                r"\s*(?P<start_period>pagi|siang|sore|malam)?"
+                r"\s*(?:-|–|—|sampai|sampe|s/d|sd|to)\s*"
+                r"(?P<end_hour>\d{1,2})(?:[:.](?P<end_minute>\d{2}))?"
+                r"\s*(?P<end_period>pagi|siang|sore|malam)?\b"
+            ),
+        ]
+        for pattern in range_patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+
+            start_period = match.group("start_period")
+            end_period = match.group("end_period")
+            inherited_start_period = start_period or end_period
+            inherited_end_period = end_period or start_period
+
+            start_time = self._normalize_time_component(
+                int(match.group("start_hour")),
+                int(match.group("start_minute") or "00"),
+                inherited_start_period,
+            )
+            end_time = self._normalize_time_component(
+                int(match.group("end_hour")),
+                int(match.group("end_minute") or "00"),
+                inherited_end_period,
+            )
+            if not start_time or not end_time:
+                return None
+
+            start_hour, start_minute = start_time
+            end_hour, end_minute = end_time
+            if (
+                not start_period
+                and not end_period
+                and end_hour < start_hour
+                and end_hour < 12
+            ):
+                end_hour += 12
+            elif (
+                not end_period
+                and start_period in {"siang", "sore", "malam"}
+                and end_hour < start_hour
+                and end_hour < 12
+            ):
+                end_hour += 12
+
+            return (
+                start_hour,
+                start_minute,
+                end_hour,
+                end_minute,
+                match.group(0).strip(),
+                match.start(),
+                match.end(),
+            )
+
+        single_time = self._extract_single_time(text)
+        if not single_time:
+            return None
+
+        start_hour, start_minute, time_phrase, time_start, time_end = single_time
+        end_at = datetime(2000, 1, 1, start_hour, start_minute) + timedelta(
+            minutes=self.settings.calendar_default_event_duration_minutes
+        )
+        return (
+            start_hour,
+            start_minute,
+            end_at.hour,
+            end_at.minute,
+            time_phrase,
+            time_start,
+            time_end,
+        )
+
+    def _extract_single_time(self, text: str) -> tuple[int, int, str, int, int] | None:
         patterns = [
             r"\b(?:jam|pukul)\s*(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2}))?\s*(?P<period>pagi|siang|sore|malam)?\b",
             r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\s*(?P<period>pagi|siang|sore|malam)?\b",
             r"\b(?P<hour>\d{1,2})\s*(?P<period>pagi|siang|sore|malam)\b",
         ]
-        match = None
         for pattern in patterns:
             match = re.search(pattern, text)
-            if match:
-                break
-        if not match:
-            return None
+            if not match:
+                continue
+            normalized = self._normalize_time_component(
+                int(match.group("hour")),
+                int(match.group("minute") or "00"),
+                match.group("period"),
+            )
+            if not normalized:
+                return None
+            hour, minute = normalized
+            return hour, minute, match.group(0).strip(), match.start(), match.end()
+        return None
 
-        hour = int(match.group("hour"))
-        minute = int(match.group("minute") or "00")
-        period = match.group("period")
+    @staticmethod
+    def _normalize_time_component(
+        hour: int,
+        minute: int,
+        period: str | None,
+    ) -> tuple[int, int] | None:
         if minute > 59 or hour > 23:
             return None
         if period:
-            if period == "pagi" and hour == 12:
-                hour = 0
-            elif period == "siang" and 1 <= hour <= 11:
-                hour += 12 if hour < 11 else 0
-            elif period == "sore" and 1 <= hour <= 11:
-                hour += 12
-            elif period == "malam" and 1 <= hour <= 11:
-                hour += 12
-        elif hour <= 7:
-            return None
-
-        return hour, minute, match.group(0).strip(), match.start(), match.end()
+            if hour < 1 or hour > 12:
+                return None
+            if period == "pagi":
+                hour = 0 if hour == 12 else hour
+            elif period == "siang":
+                if 1 <= hour <= 10:
+                    hour += 12
+            elif period in {"sore", "malam"}:
+                if 1 <= hour <= 11:
+                    hour += 12
+        return hour, minute
 
     def _extract_title_and_context(
         self,
@@ -288,13 +416,23 @@ class NaturalLanguageInputService:
         if not content:
             content = raw_text
             content = re.sub(
-                r"^(ingetin aku|ingatkan aku|remind me|jadwalin|schedule|buat reminder)\s*",
+                (
+                    r"^(ingetin aku|ingatkan aku|remind me|jadwalin|schedule|buat reminder|"
+                    r"buat event|bikin event|tambahin ke kalender|tambahin ke calendar|"
+                    r"masukin ke kalender|masukin ke calendar|masukkan ke kalender|masukkan ke calendar)\s*"
+                ),
                 "",
                 content,
                 flags=re.IGNORECASE,
             )
             content = re.sub(
                 r"\b(hari ini|besok|lusa|malam ini|senin|selasa|rabu|kamis|jumat|jum'at|sabtu|minggu|today)\b",
+                "",
+                content,
+                flags=re.IGNORECASE,
+            )
+            content = re.sub(
+                r"\b(?:jam|pukul)?\s*\d{1,2}(?:[:.]\d{2})?\s*(?:pagi|siang|sore|malam)?\s*(?:-|–|—|sampai|sampe|s/d|sd|to)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:pagi|siang|sore|malam)?\b",
                 "",
                 content,
                 flags=re.IGNORECASE,
@@ -340,9 +478,9 @@ class NaturalLanguageInputService:
     def _is_negative_reply(text: str) -> bool:
         return text in {"nggak", "ga", "gak", "tidak", "bukan", "jangan", "cancel", "batal"}
 
-    def _format_confirmation_time(self, when: datetime) -> str:
+    def _format_confirmation_time(self, start_at: datetime, end_at: datetime) -> str:
         now = datetime.now(self._timezone).date()
-        target_date = when.date()
+        target_date = start_at.date()
         if target_date == now:
             day_label = "hari ini"
         elif target_date == now + timedelta(days=1):
@@ -350,13 +488,18 @@ class NaturalLanguageInputService:
         elif target_date == now + timedelta(days=2):
             day_label = "lusa"
         else:
-            day_label = when.strftime("%A %d %b").lower()
-        return f"{day_label} jam {when.strftime('%H:%M')}"
+            day_label = start_at.strftime("%A %d %b").lower()
+        return f"{day_label} jam {start_at.strftime('%H:%M')}-{end_at.strftime('%H:%M')}"
 
     @staticmethod
     def _build_calendar_description(pending: PendingConfirmation) -> str:
         lines = [f"Source chat: {pending.source_text}"]
         if pending.context:
             lines.append(f"Konteks: {pending.context}")
+        lines.append(
+            "Waktu: "
+            f"{pending.scheduled_at.strftime('%Y-%m-%d %H:%M')} - "
+            f"{pending.end_at.strftime('%Y-%m-%d %H:%M')}"
+        )
         lines.append(f"Target: {pending.title}")
         return "\n".join(lines)

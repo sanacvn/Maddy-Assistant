@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,8 @@ logger = logging.getLogger(__name__)
 class ToolRegistry:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._local_task_lock = asyncio.Lock()
+        self._timezone = ZoneInfo(settings.timezone)
 
     def get_function_declarations(self) -> list[dict[str, Any]]:
         return [
@@ -84,6 +89,66 @@ class ToolRegistry:
                 "parameters": {"type": "OBJECT", "properties": {}},
             },
             {
+                "name": "google_docs_read",
+                "description": "Read plain text content from a Google Docs document used as persistent context.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "document_id": {
+                            "type": "STRING",
+                            "description": "Optional Google Docs document ID or full URL. Defaults to GOOGLE_DOCS_DOCUMENT_ID.",
+                        },
+                        "max_chars": {
+                            "type": "INTEGER",
+                            "description": "Maximum characters to return from the document content.",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "google_docs_append",
+                "description": "Append plain text to the end of a Google Docs document used as persistent context.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "text": {"type": "STRING"},
+                        "document_id": {
+                            "type": "STRING",
+                            "description": "Optional Google Docs document ID or full URL. Defaults to GOOGLE_DOCS_DOCUMENT_ID.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "google_docs_replace",
+                "description": "Replace the main body content of a Google Docs document with new plain text.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "text": {"type": "STRING"},
+                        "document_id": {
+                            "type": "STRING",
+                            "description": "Optional Google Docs document ID or full URL. Defaults to GOOGLE_DOCS_DOCUMENT_ID.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "google_docs_check_setup",
+                "description": "Check Google Docs configuration and whether the configured document is accessible to the bot.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "document_id": {
+                            "type": "STRING",
+                            "description": "Optional Google Docs document ID or full URL. Defaults to GOOGLE_DOCS_DOCUMENT_ID.",
+                        }
+                    },
+                },
+            },
+            {
                 "name": "web_search",
                 "description": "Search the web for current information.",
                 "parameters": {
@@ -120,6 +185,10 @@ class ToolRegistry:
             "calendar_list_events": self.calendar_list_events,
             "calendar_create_event": self.calendar_create_event,
             "calendar_check_setup": self.calendar_check_setup,
+            "google_docs_read": self.google_docs_read,
+            "google_docs_append": self.google_docs_append,
+            "google_docs_replace": self.google_docs_replace,
+            "google_docs_check_setup": self.google_docs_check_setup,
             "web_search": self.web_search,
             "browser_fetch": self.browser_fetch,
             "get_current_time": self.get_current_time,
@@ -138,13 +207,16 @@ class ToolRegistry:
         window_hours: int = 3,
         deadline_before: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        await self.ensure_daily_tasks(now)
         providers = self._enabled_task_providers()
         deadline_before = deadline_before or (now + timedelta(hours=window_hours))
         tasks: list[dict[str, Any]] = []
 
         for provider in providers:
             try:
-                if provider == "notion":
+                if provider == "local":
+                    tasks.extend(await self._local_list_urgent_tasks(now, deadline_before))
+                elif provider == "notion":
                     tasks.extend(await self._notion_list_urgent_tasks(now, deadline_before))
                 elif provider == "todoist":
                     tasks.extend(await self._todoist_list_urgent_tasks(now, deadline_before))
@@ -155,6 +227,65 @@ class ToolRegistry:
                 continue
 
         return tasks
+
+    async def ensure_daily_tasks(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        if not self.settings.daily_task_list_enabled or not self.settings.daily_task_templates:
+            return []
+
+        current = now.astimezone(self._timezone) if now else datetime.now(self._timezone)
+        due_at = current.replace(
+            hour=self.settings.daily_task_due_hour,
+            minute=self.settings.daily_task_due_minute,
+            second=0,
+            microsecond=0,
+        )
+        created: list[dict[str, Any]] = []
+
+        async with self._local_task_lock:
+            items = self._load_local_tasks_unlocked()
+            pruned_items = self._prune_local_tasks(items, current)
+            changed = len(pruned_items) != len(items)
+            items = pruned_items
+            existing_keys = {
+                identity
+                for identity in (self._local_task_identity(item) for item in items)
+                if identity
+            }
+
+            for title in self.settings.daily_task_templates:
+                daily_key = self._daily_task_key(current, title)
+                if daily_key in existing_keys:
+                    continue
+
+                item = {
+                    "id": daily_key,
+                    "title": title,
+                    "due": due_at.isoformat(),
+                    "status": "needsAction",
+                    "notes": "Auto-generated daily task.",
+                    "daily_key": daily_key,
+                    "created_at": current.isoformat(),
+                }
+                items.append(item)
+                existing_keys.add(daily_key)
+                changed = True
+                created.append(
+                    {
+                        "task_key": f"local:{daily_key}",
+                        "source": "local",
+                        "task_id": daily_key,
+                        "task_name": title,
+                        "deadline_at": due_at,
+                        "progress": item["notes"],
+                        "status": item["status"],
+                        "url": None,
+                    }
+                )
+
+            if changed:
+                self._save_local_tasks_unlocked(items)
+
+        return created
 
     async def notion_search(self, query: str) -> dict[str, Any]:
         if not self.settings.notion_api_key:
@@ -300,11 +431,13 @@ class ToolRegistry:
         description: str = "",
     ) -> dict[str, Any]:
         service = self._calendar_service()
+        start_value = self._calendar_event_datetime_value(start_iso)
+        end_value = self._calendar_event_datetime_value(end_iso)
         event = {
             "summary": summary,
             "description": description,
-            "start": {"dateTime": start_iso, "timeZone": self.settings.timezone},
-            "end": {"dateTime": end_iso, "timeZone": self.settings.timezone},
+            "start": {"dateTime": start_value, "timeZone": self.settings.timezone},
+            "end": {"dateTime": end_value, "timeZone": self.settings.timezone},
         }
         try:
             created = service.events().insert(
@@ -354,6 +487,189 @@ class ToolRegistry:
             "note": (
                 "If this is not the expected calendar, set GOOGLE_CALENDAR_ID to the exact "
                 "calendar ID or Gmail address of the shared calendar."
+            ),
+        }
+
+    async def google_docs_read(
+        self,
+        document_id: str | None = None,
+        max_chars: int = 12000,
+    ) -> dict[str, Any]:
+        try:
+            resolved_document_id = self._google_docs_resolve_document_id(document_id)
+            document = self._google_docs_load_document(
+                resolved_document_id,
+                readonly=True,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except HttpError as exc:
+            result = self._google_docs_http_error(exc)
+            result["document_id"] = self._google_docs_extract_document_id(
+                document_id or self.settings.google_docs_document_id
+            )
+            return result
+
+        content = self._google_docs_plain_text(document)
+        safe_limit = min(20000, max(500, max_chars))
+        return {
+            "ok": True,
+            "document_id": resolved_document_id,
+            "title": document.get("title") or "Untitled",
+            "document_url": self._google_docs_url(resolved_document_id),
+            "content": content[:safe_limit],
+            "truncated": len(content) > safe_limit,
+            "word_count": len(content.split()),
+        }
+
+    async def google_docs_append(
+        self,
+        text: str,
+        document_id: str | None = None,
+    ) -> dict[str, Any]:
+        clean_text = text.strip()
+        if not clean_text:
+            return {"ok": False, "error": "text cannot be empty."}
+
+        try:
+            resolved_document_id = self._google_docs_resolve_document_id(document_id)
+            document = self._google_docs_load_document(resolved_document_id, readonly=False)
+            existing_content = self._google_docs_plain_text(document)
+            insert_index = self._google_docs_end_index(document)
+            prefix = "\n\n" if existing_content.strip() else ""
+            body = {
+                "requests": [
+                    {
+                        "insertText": {
+                            "location": {"index": insert_index},
+                            "text": f"{prefix}{clean_text}",
+                        }
+                    }
+                ]
+            }
+            self._google_docs_service(readonly=False).documents().batchUpdate(
+                documentId=resolved_document_id,
+                body=body,
+            ).execute()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except HttpError as exc:
+            result = self._google_docs_http_error(exc)
+            result["document_id"] = self._google_docs_extract_document_id(
+                document_id or self.settings.google_docs_document_id
+            )
+            return result
+
+        updated_document = self._google_docs_load_document(resolved_document_id, readonly=True)
+        updated_content = self._google_docs_plain_text(updated_document)
+        return {
+            "ok": True,
+            "document_id": resolved_document_id,
+            "title": updated_document.get("title") or "Untitled",
+            "document_url": self._google_docs_url(resolved_document_id),
+            "appended_chars": len(clean_text),
+            "word_count": len(updated_content.split()),
+        }
+
+    async def google_docs_replace(
+        self,
+        text: str,
+        document_id: str | None = None,
+    ) -> dict[str, Any]:
+        clean_text = text.strip()
+        if not clean_text:
+            return {"ok": False, "error": "text cannot be empty."}
+
+        try:
+            resolved_document_id = self._google_docs_resolve_document_id(document_id)
+            document = self._google_docs_load_document(resolved_document_id, readonly=False)
+            requests: list[dict[str, Any]] = []
+            body_end_index = self._google_docs_body_end_index(document)
+            if body_end_index > 1:
+                requests.append(
+                    {
+                        "deleteContentRange": {
+                            "range": {
+                                "startIndex": 1,
+                                "endIndex": body_end_index,
+                            }
+                        }
+                    }
+                )
+            requests.append(
+                {
+                    "insertText": {
+                        "location": {"index": 1},
+                        "text": clean_text,
+                    }
+                }
+            )
+            self._google_docs_service(readonly=False).documents().batchUpdate(
+                documentId=resolved_document_id,
+                body={"requests": requests},
+            ).execute()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except HttpError as exc:
+            result = self._google_docs_http_error(exc)
+            result["document_id"] = self._google_docs_extract_document_id(
+                document_id or self.settings.google_docs_document_id
+            )
+            return result
+
+        updated_document = self._google_docs_load_document(resolved_document_id, readonly=True)
+        updated_content = self._google_docs_plain_text(updated_document)
+        return {
+            "ok": True,
+            "document_id": resolved_document_id,
+            "title": updated_document.get("title") or "Untitled",
+            "document_url": self._google_docs_url(resolved_document_id),
+            "word_count": len(updated_content.split()),
+        }
+
+    async def google_docs_check_setup(self, document_id: str | None = None) -> dict[str, Any]:
+        service_account_file = self.settings.google_service_account_file
+        if not service_account_file:
+            return {"ok": False, "error": "GOOGLE_SERVICE_ACCOUNT_FILE is not configured."}
+
+        file_path = Path(service_account_file)
+        if not file_path.exists():
+            return {"ok": False, "error": f"Service account file not found: {service_account_file}"}
+
+        try:
+            resolved_document_id = self._google_docs_resolve_document_id(document_id)
+            credentials = service_account.Credentials.from_service_account_file(
+                service_account_file,
+                scopes=["https://www.googleapis.com/auth/documents"],
+            )
+            document = build(
+                "docs",
+                "v1",
+                credentials=credentials,
+                cache_discovery=False,
+            ).documents().get(documentId=resolved_document_id).execute()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except HttpError as exc:
+            result = self._google_docs_http_error(exc)
+            result["document_id"] = self._google_docs_extract_document_id(
+                document_id or self.settings.google_docs_document_id
+            )
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": f"Failed to load Google Docs setup: {exc}"}
+
+        content = self._google_docs_plain_text(document)
+        return {
+            "ok": True,
+            "document_id": resolved_document_id,
+            "title": document.get("title") or "Untitled",
+            "document_url": self._google_docs_url(resolved_document_id),
+            "service_account_email": credentials.service_account_email,
+            "word_count": len(content.split()),
+            "note": (
+                "Share the document directly to this service account email with Editor access "
+                "if you want the bot to append or replace content."
             ),
         }
 
@@ -450,6 +766,136 @@ class ToolRegistry:
             "details": content or str(exc),
         }
 
+    def _calendar_event_datetime_value(self, value: str) -> str:
+        parsed = self._parse_datetime(value)
+        if not parsed:
+            return value
+        localized = parsed.astimezone(ZoneInfo(self.settings.timezone))
+        return localized.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def _google_docs_service(self, readonly: bool):
+        if not self.settings.google_service_account_file:
+            raise ValueError("GOOGLE_SERVICE_ACCOUNT_FILE is not configured.")
+
+        scope = (
+            "https://www.googleapis.com/auth/documents.readonly"
+            if readonly
+            else "https://www.googleapis.com/auth/documents"
+        )
+        credentials = service_account.Credentials.from_service_account_file(
+            self.settings.google_service_account_file,
+            scopes=[scope],
+        )
+        return build("docs", "v1", credentials=credentials, cache_discovery=False)
+
+    def _google_docs_resolve_document_id(self, document_id: str | None) -> str:
+        raw_value = document_id or self.settings.google_docs_document_id
+        if not raw_value:
+            raise ValueError(
+                "Missing Google Docs document ID. Set GOOGLE_DOCS_DOCUMENT_ID or pass document_id."
+            )
+
+        resolved = self._google_docs_extract_document_id(raw_value)
+        if not resolved:
+            raise ValueError(
+                "Invalid Google Docs document ID or URL. Expected a Docs ID or https://docs.google.com/document/d/... URL."
+            )
+        return resolved
+
+    @staticmethod
+    def _google_docs_extract_document_id(raw_value: str | None) -> str | None:
+        if not raw_value:
+            return None
+
+        stripped = raw_value.strip()
+        match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", stripped)
+        if match:
+            return match.group(1)
+        if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", stripped):
+            return stripped
+        return None
+
+    def _google_docs_load_document(self, document_id: str, readonly: bool) -> dict[str, Any]:
+        return self._google_docs_service(readonly).documents().get(documentId=document_id).execute()
+
+    @staticmethod
+    def _google_docs_url(document_id: str) -> str:
+        return f"https://docs.google.com/document/d/{document_id}/edit"
+
+    @staticmethod
+    def _google_docs_plain_text(document: dict[str, Any]) -> str:
+        chunks: list[str] = []
+
+        def walk_content(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    walk_content(item)
+                return
+            if not isinstance(value, dict):
+                return
+            text_run = value.get("textRun")
+            if isinstance(text_run, dict):
+                content = text_run.get("content")
+                if isinstance(content, str):
+                    chunks.append(content)
+            for nested_value in value.values():
+                walk_content(nested_value)
+
+        walk_content(document.get("body", {}).get("content", []))
+        return "".join(chunks).strip()
+
+    @staticmethod
+    def _google_docs_body_end_index(document: dict[str, Any]) -> int:
+        body_content = document.get("body", {}).get("content", [])
+        if not body_content:
+            return 1
+        last_item = body_content[-1]
+        end_index = last_item.get("endIndex")
+        if not isinstance(end_index, int):
+            return 1
+        return max(1, end_index - 1)
+
+    @classmethod
+    def _google_docs_end_index(cls, document: dict[str, Any]) -> int:
+        return cls._google_docs_body_end_index(document)
+
+    def _google_docs_http_error(self, exc: HttpError) -> dict[str, Any]:
+        status = getattr(exc.resp, "status", None)
+        content = ""
+        if getattr(exc, "content", None):
+            try:
+                content = exc.content.decode("utf-8", errors="ignore")[:500]
+            except Exception:
+                content = str(exc)[:500]
+
+        if status == 404:
+            return {
+                "ok": False,
+                "error": (
+                    "Google Docs document tidak ditemukan. Pastikan document ID benar dan file itu "
+                    "di-share ke email service account."
+                ),
+                "status": status,
+                "details": content,
+            }
+        if status == 403:
+            return {
+                "ok": False,
+                "error": (
+                    "Akses Google Docs ditolak. Pastikan Google Docs API aktif dan dokumen target "
+                    "sudah di-share ke email service account sebagai Editor."
+                ),
+                "status": status,
+                "details": content,
+            }
+
+        return {
+            "ok": False,
+            "error": f"Google Docs API error: HTTP {status}",
+            "status": status,
+            "details": content or str(exc),
+        }
+
     @staticmethod
     def _extract_notion_title(item: dict[str, Any]) -> str:
         properties = item.get("properties", {})
@@ -466,6 +912,10 @@ class ToolRegistry:
     def _enabled_task_providers(self) -> list[str]:
         source = self.settings.dynamic_nagging_source
         providers: list[str] = []
+        if source in {"auto", "local"} and (
+            self.settings.daily_task_list_enabled or self._local_task_store_path().exists()
+        ):
+            providers.append("local")
         if source in {"auto", "notion"} and self.settings.notion_api_key and self.settings.notion_task_database_id:
             providers.append("notion")
         if source in {"auto", "todoist"} and self.settings.todoist_api_token:
@@ -473,6 +923,38 @@ class ToolRegistry:
         if source in {"auto", "google_tasks"} and self.settings.google_tasks_tasklist_id:
             providers.append("google_tasks")
         return providers
+
+    async def _local_list_urgent_tasks(
+        self,
+        now: datetime,
+        deadline_before: datetime,
+    ) -> list[dict[str, Any]]:
+        async with self._local_task_lock:
+            items = self._load_local_tasks_unlocked()
+
+        tasks = []
+        for item in items:
+            if item.get("status") == "completed":
+                continue
+
+            deadline_at = self._parse_datetime(item.get("due"))
+            if not deadline_at or deadline_at > deadline_before or deadline_at < now - timedelta(hours=1):
+                continue
+
+            task_id = str(item.get("id") or self._daily_task_key(deadline_at, item.get("title", "")))
+            tasks.append(
+                {
+                    "task_key": f"local:{task_id}",
+                    "source": "local",
+                    "task_id": task_id,
+                    "task_name": item.get("title") or "Local task",
+                    "deadline_at": deadline_at,
+                    "progress": item.get("notes", ""),
+                    "status": item.get("status", "needsAction"),
+                    "url": None,
+                }
+            )
+        return tasks
 
     async def _notion_list_urgent_tasks(
         self,
@@ -722,6 +1204,59 @@ class ToolRegistry:
         if self.settings.google_tasks_impersonate_user:
             credentials = credentials.with_subject(self.settings.google_tasks_impersonate_user)
         return build("tasks", "v1", credentials=credentials, cache_discovery=False)
+
+    def _local_task_store_path(self) -> Path:
+        return Path(self.settings.local_task_store_file)
+
+    def _load_local_tasks_unlocked(self) -> list[dict[str, Any]]:
+        path = self._local_task_store_path()
+        if not path.exists():
+            return []
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Failed to load local task store path=%s", path)
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _save_local_tasks_unlocked(self, items: list[dict[str, Any]]) -> None:
+        path = self._local_task_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(items, ensure_ascii=True, indent=2) + "\n")
+
+    @staticmethod
+    def _normalize_task_name(name: str) -> str:
+        return " ".join(name.lower().split())
+
+    def _daily_task_key(self, current: datetime, title: str) -> str:
+        return f"{current.date().isoformat()}::{self._normalize_task_name(title)}"
+
+    def _local_task_identity(self, item: dict[str, Any]) -> str | None:
+        daily_key = item.get("daily_key")
+        if isinstance(daily_key, str) and daily_key.strip():
+            return daily_key.strip()
+
+        title = str(item.get("title") or "").strip()
+        due = self._parse_datetime(item.get("due"))
+        if not title or not due:
+            return None
+        return f"{due.date().isoformat()}::{self._normalize_task_name(title)}"
+
+    def _prune_local_tasks(
+        self,
+        items: list[dict[str, Any]],
+        current: datetime,
+    ) -> list[dict[str, Any]]:
+        cutoff_date = current.date() - timedelta(days=14)
+        kept: list[dict[str, Any]] = []
+        for item in items:
+            due = self._parse_datetime(item.get("due"))
+            if due and due.date() < cutoff_date:
+                continue
+            kept.append(item)
+        return kept
 
     def _parse_datetime(self, value: str | None) -> datetime | None:
         if not value:

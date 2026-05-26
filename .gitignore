@@ -5,3 +5,4 @@ __pycache__/
 playwright-report/
 *.log
 service-account.json
+var/task_list.json

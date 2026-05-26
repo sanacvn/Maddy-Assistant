@@ -3,6 +3,7 @@
 Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool untuk:
 
 - Notion
+- Google Docs
 - Google Calendar
 - Browser internet
 
@@ -11,6 +12,7 @@ Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool un
 - Chat dua arah di Telegram
 - Function calling ke tool lokal
 - Cari dan buat page di Notion
+- Baca dan tulis context store di Google Docs
 - Lihat dan buat event di Google Calendar
 - Search web dan buka halaman web untuk diambil ringkasannya
 
@@ -27,6 +29,7 @@ Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool un
 - Natural language input untuk bikin reminder/jadwal dari chat biasa
 - Morning briefing harian ke Telegram jam 06:00
 - Chain reminders Telegram setelah event tertentu selesai
+- Daily auto-task list lokal untuk habit berulang seperti Duolingo dan Hack The Box
 
 ## Setup
 
@@ -50,7 +53,7 @@ cp .env.example .env
 - Telegram: buat bot di BotFather dan ambil token
 - Gemini: buat API key di Google AI Studio
 - Notion: buat internal integration, share page target ke integration itu
-- Google Calendar: buat service account, aktifkan Calendar API, lalu share kalender target ke email service account
+- Google Calendar dan Google Docs: buat service account, aktifkan Google Calendar API dan Google Docs API, lalu share resource target ke email service account
 - Reminder target chat: chat dulu ke bot lalu pakai command `/chat_id` untuk ambil `REMINDER_TELEGRAM_CHAT_ID`
 
 Detail penting untuk Google Calendar:
@@ -59,6 +62,26 @@ Detail penting untuk Google Calendar:
 - Isi `GOOGLE_CALENDAR_ID` dengan email Gmail kalender target atau calendar ID yang persis dari Google Calendar settings
 - Share kalender target itu ke email service account, minimal izin lihat event. Untuk membuat event, beri izin edit
 - Setelah bot jalan, pakai command Telegram `/calendar_check` untuk validasi setup
+
+Detail penting untuk Google Docs:
+
+- Isi `GOOGLE_DOCS_DOCUMENT_ID` dengan document ID dari URL Google Docs kamu
+- Share dokumen target itu langsung ke email service account
+- Kalau bot cuma perlu baca, akses Viewer cukup. Kalau bot perlu append/replace isi dokumen, beri akses Editor
+- Jika mau bot otomatis baca context di setiap turn dan menyimpan memory penting tanpa disuruh, biarkan `GOOGLE_DOCS_CONTEXT_AUTO_SYNC=true`
+- Setelah bot jalan, pakai command Telegram `/docs_check` untuk validasi setup
+
+Contoh URL:
+
+```text
+https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890/edit
+```
+
+Maka `GOOGLE_DOCS_DOCUMENT_ID` adalah:
+
+```text
+1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
+```
 
 ## Menjalankan
 
@@ -114,6 +137,7 @@ DYNAMIC_NAGGING_MAX_REMINDERS=3
 
 Provider yang didukung sekarang:
 
+- Local task list bawaan di `var/task_list.json`. Ini dipakai juga buat auto-task harian seperti `Duolingo` dan `Hack The Box`.
 - Notion database: isi `NOTION_TASK_DATABASE_ID` lalu map nama property title, status, deadline, dan progress sesuai database kamu.
 - Todoist: isi `TODOIST_API_TOKEN`.
 - Google Tasks: isi `GOOGLE_TASKS_TASKLIST_ID`, lalu pakai service account yang memang punya akses ke tasklist itu. Kalau perlu domain-wide delegation, isi juga `GOOGLE_TASKS_IMPERSONATE_USER`.
@@ -125,6 +149,30 @@ Perilaku nagging:
 - Maksimal 3 reminder per task dalam state lokal bot.
 - Balasan seperti `kerjain sekarang`, `ingetin lagi 30 menit`, atau `udah selesai` akan ditangkap dan dipakai buat follow-up otomatis.
 
+## Daily Auto Task List
+
+Bot sekarang bisa bikin task harian otomatis tanpa perlu diminta dulu. Default-nya setiap tanggal baru akan menambahkan:
+
+- `Duolingo`
+- `Hack The Box`
+
+Task ini disimpan ke task list lokal di `var/task_list.json`, lalu otomatis ikut kebaca oleh `morning briefing` dan `dynamic nagging` kalau sumber task memakai mode `auto`.
+
+Env tambahan:
+
+```bash
+DAILY_TASK_LIST_ENABLED=true
+DAILY_TASK_TEMPLATES=Duolingo,Hack The Box
+DAILY_TASK_DUE_HOUR=20
+DAILY_TASK_DUE_MINUTE=0
+LOCAL_TASK_STORE_FILE=var/task_list.json
+```
+
+Catatan:
+
+- Pembuatan task dijaga idempoten, jadi `Duolingo` dan `Hack The Box` tidak akan dobel di hari yang sama.
+- File task lokal otomatis dipangkas untuk item lama, jadi store-nya tidak terus membengkak.
+
 ## Natural Language Input
 
 Bot juga bisa nangkep pesan santai yang isinya minta diingetin atau dijadwalin, lalu selalu minta konfirmasi sebelum nyimpen ke Google Calendar.
@@ -133,12 +181,14 @@ Contoh:
 
 ```text
 Ingetin aku besok jam 3 sore buat baca jurnal RAG ya
+Bikin event meeting skripsi besok jam 11-12
+Tambahin ke kalender besok jam 11 sampai 12 untuk call client
 ```
 
 Balasan bot:
 
 ```text
-Oke, aku set: Baca jurnal RAG besok jam 15:00. Betul ya?
+Oke, aku set: Meeting skripsi besok jam 11:00-12:00. Betul ya?
 ```
 
 Kalau user jawab `iya`, bot akan bikin event Google Calendar. Event itu nanti ikut kebaca sama reminder kontekstual modul 01 saat waktunya tiba.
@@ -150,9 +200,69 @@ NATURAL_LANGUAGE_INPUT_ENABLED=true
 CALENDAR_DEFAULT_EVENT_DURATION_MINUTES=30
 ```
 
+## Google Docs Context Store
+
+Bot sekarang bisa pakai satu Google Doc sebagai memory eksternal yang tahan restart, cocok buat preserve context jangka panjang.
+
+Env tambahan:
+
+```bash
+GOOGLE_DOCS_DOCUMENT_ID=your_google_doc_id
+GOOGLE_DOCS_CONTEXT_AUTO_SYNC=true
+GOOGLE_DOCS_CONTEXT_MAX_CHARS=6000
+```
+
+Pola pakai yang didukung:
+
+- baca isi dokumen untuk konteks lama
+- append context baru ke bawah dokumen
+- replace isi body dokumen kalau kamu memang mau reset total context
+- auto-load context dari dokumen sebelum bot menjawab
+- auto-append memory penting kalau user menyebut preferensi, prioritas, keputusan, constraint, atau proyek yang ongoing
+
+Struktur dokumen yang direkomendasikan:
+
+```text
+Agent Context Store
+
+Identity & Preferences
+- bahasa utama: Indonesia santai
+- kerja paling fokus malam hari
+
+Current Priorities
+- thesis bab 3
+- cari internship ML
+
+Open Loops
+- belum pilih topik eksperimen final
+
+Recent Decisions
+- pakai Google Docs sebagai persistent memory utama
+
+Memory Log
+- [2026-05-26 10:15 Asia/Jakarta] priority: Fokus minggu ini thesis bab 3.
+- [2026-05-26 10:16 Asia/Jakarta] preference: Lebih suka jawaban singkat, langsung ke inti.
+```
+
+Contoh chat:
+
+```text
+Baca context yang ada di Google Doc
+Tambahin ke context store: tadi aku mutusin fokus minggu ini cuma ngerjain thesis bab 3
+Ganti seluruh context doc dengan ringkasan terbaru ini: ...
+```
+
+Catatan:
+
+- Implementasi saat ini fokus ke plain text body dokumen
+- Kalau dokumennya sangat panjang, tool baca akan mengembalikan potongan awal dengan batas karakter
+- Setup ini paling simpel kalau kamu pakai satu dokumen utama khusus memory agent
+- Jika dokumen masih kosong dan auto-sync aktif, bot akan menginisialisasi template context store secara otomatis
+
 Catatan:
 
 - Parser sekarang cover pola waktu umum seperti `hari ini`, `besok`, `lusa`, nama hari, tanggal eksplisit, dan format `jam 3 sore` atau `15:30`.
+- Range jam seperti `jam 11-12`, `11:00-12:00`, dan `11 sampai 12` sekarang dibaca sebagai start dan end time yang presisi.
 - Kalau waktu belum cukup jelas, bot akan minta format yang lebih spesifik dulu dan belum menyimpan apa pun.
 - Deskripsi event otomatis diisi `Konteks:` dan `Target:` kalau ada, supaya reminder modul 01 bisa pakai konteks itu.
 

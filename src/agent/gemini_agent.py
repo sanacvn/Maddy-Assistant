@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -11,6 +13,25 @@ from .tools import ToolRegistry
 
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_GOOGLE_DOCS_CONTEXT_TEMPLATE = """Agent Context Store
+
+Identity & Preferences
+- 
+
+Current Priorities
+- 
+
+Open Loops
+- 
+
+Recent Decisions
+- 
+
+Memory Log
+- Context document initialized.
+"""
 
 
 class UpstreamServiceError(Exception):
@@ -22,14 +43,16 @@ class GeminiTelegramAgent:
         self.settings = settings
         self.tools = ToolRegistry(settings)
         self.histories: dict[int, list[dict[str, Any]]] = {}
-        self.system_instruction = (
+        self._google_docs_template_initialized = False
+        self.base_system_instruction = (
             "You are a practical AI assistant inside Telegram. "
-            "Use tools whenever the user asks about Notion, calendar, time, or up-to-date web information. "
+            "Use tools whenever the user asks about Notion, Google Docs, calendar, time, or up-to-date web information. "
             "Before creating events or Notion pages, infer missing details from context when safe, otherwise ask a short follow-up. "
+            "For calendar requests, if the user gives an exact date, exact time, or time range, preserve it exactly. "
+            "Do not invent or shift hours. If the time is ambiguous or missing, ask a short clarification before creating the event. "
             "Respond in the user's language. "
             "Default tone: casual, confident, playful, and not stiff. "
             "Keep replies relatively short, use natural Indonesian slang when the user is casual, and avoid formal corporate phrasing. "
-            "Match a 'bad bitch' energy lightly: sharp, witty, and expressive, but still helpful and readable. "
             "Do not be overly polite or do unnecessary small talk. "
             "Skip greetings, filler, and softening phrases unless the user explicitly wants them. "
             "Lead with the point, not pleasantries. "
@@ -44,10 +67,12 @@ class GeminiTelegramAgent:
         }
         history.append(user_turn)
         self._trim_history(history)
+        persistent_context = await self._load_persistent_context()
+        system_instruction = self._build_system_instruction(persistent_context)
 
         for attempt in range(2):
             try:
-                return await self._run_conversation(history)
+                return await self._run_conversation(history, system_instruction)
             except UpstreamServiceError:
                 return (
                     "Layanan Gemini sedang bermasalah sementara. "
@@ -68,9 +93,13 @@ class GeminiTelegramAgent:
     def reset_history(self, chat_id: int) -> None:
         self.histories.pop(chat_id, None)
 
-    async def _run_conversation(self, history: list[dict[str, Any]]) -> str:
+    async def _run_conversation(
+        self,
+        history: list[dict[str, Any]],
+        system_instruction: str,
+    ) -> str:
         for _ in range(6):
-            response = await self._generate_content(history)
+            response = await self._generate_content(history, system_instruction)
             candidate = response["candidates"][0]["content"]
             parts = candidate.get("parts", [])
             history.append(candidate)
@@ -102,14 +131,18 @@ class GeminiTelegramAgent:
 
         return "Saya tidak bisa menyelesaikan permintaan itu setelah beberapa langkah tool call."
 
-    async def _generate_content(self, history: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _generate_content(
+        self,
+        history: list[dict[str, Any]],
+        system_instruction: str,
+    ) -> dict[str, Any]:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.settings.gemini_model}:generateContent"
         )
         payload = {
             "systemInstruction": {
-                "parts": [{"text": self.system_instruction}]
+                "parts": [{"text": system_instruction}]
             },
             "contents": history,
             "tools": [
@@ -158,6 +191,96 @@ class GeminiTelegramAgent:
                     raise
 
         raise UpstreamServiceError("Gemini request failed after retries")
+
+    async def _load_persistent_context(self) -> str | None:
+        if (
+            not self.settings.google_docs_document_id
+            or not self.settings.google_docs_context_auto_sync
+        ):
+            return None
+
+        await self._ensure_google_docs_context_template()
+        result = await self.tools.google_docs_read(
+            max_chars=self.settings.google_docs_context_max_chars,
+        )
+        if not result.get("ok"):
+            logger.warning(
+                "Failed to load Google Docs persistent context: %s",
+                result.get("error"),
+            )
+            return None
+
+        content = str(result.get("content") or "").strip()
+        if not content:
+            return None
+        return content
+
+    async def _ensure_google_docs_context_template(self) -> None:
+        if (
+            self._google_docs_template_initialized
+            or not self.settings.google_docs_document_id
+            or not self.settings.google_docs_context_auto_sync
+        ):
+            return
+
+        read_result = await self.tools.google_docs_read(max_chars=1000)
+        if not read_result.get("ok"):
+            logger.warning(
+                "Failed to inspect Google Docs template state: %s",
+                read_result.get("error"),
+            )
+            return
+
+        current_content = str(read_result.get("content") or "").strip()
+        if current_content:
+            self._google_docs_template_initialized = True
+            return
+
+        timestamp = datetime.now(ZoneInfo(self.settings.timezone)).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        template = DEFAULT_GOOGLE_DOCS_CONTEXT_TEMPLATE.replace(
+            "- Context document initialized.",
+            f"- [{timestamp} {self.settings.timezone}] Context document initialized.",
+        )
+        write_result = await self.tools.google_docs_replace(template)
+        if not write_result.get("ok"):
+            logger.warning(
+                "Failed to initialize Google Docs context template: %s",
+                write_result.get("error"),
+            )
+            return
+
+        self._google_docs_template_initialized = True
+
+    def _build_system_instruction(self, persistent_context: str | None) -> str:
+        now_text = datetime.now(ZoneInfo(self.settings.timezone)).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        parts = [self.base_system_instruction]
+
+        if self.settings.google_docs_document_id and self.settings.google_docs_context_auto_sync:
+            parts.append(
+                "Persistent memory policy: "
+                "The configured Google Docs document is the bot's long-term memory and context store. "
+                "Use that memory proactively without waiting for the user to ask. "
+                "A current snapshot may be injected below; treat it as authoritative background context. "
+                "When the user reveals durable information that will matter later, you should update memory on your own before your final reply, usually with google_docs_append. "
+                "Durable information includes preferences, identity details, recurring constraints, ongoing projects, current priorities, explicit decisions, and open loops likely to matter in later chats. "
+                "Do not store secrets, passwords, tokens, OTPs, private credentials, or low-signal small talk. "
+                "Prefer google_docs_append for incremental memory updates. Use google_docs_replace only when the user explicitly asks to rewrite, reset, or reorganize the whole document. "
+                f"When writing memory notes, keep them concise and use this local timestamp format when helpful: [{now_text} {self.settings.timezone}] category: note. "
+                "Keep the document structure stable with these sections in order: Identity & Preferences, Current Priorities, Open Loops, Recent Decisions, Memory Log. "
+                "If the document already has content, preserve it rather than overwriting it."
+            )
+
+        if persistent_context:
+            parts.append(
+                "Current Google Docs memory snapshot:\n"
+                f"{persistent_context}"
+            )
+
+        return "\n\n".join(parts)
 
     @staticmethod
     def _extract_function_call(parts: list[dict[str, Any]]) -> dict[str, Any] | None:
