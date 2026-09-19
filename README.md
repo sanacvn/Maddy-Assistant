@@ -2,6 +2,7 @@
 
 Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool untuk:
 
+- Obsidian vault pribadi
 - Notion
 - Google Docs
 - Google Calendar
@@ -11,6 +12,7 @@ Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool un
 
 - Chat dua arah di Telegram
 - Function calling ke tool lokal
+- Search dan tulis catatan Obsidian
 - Cari dan buat page di Notion
 - Baca dan tulis context store di Google Docs
 - Lihat dan buat event di Google Calendar
@@ -20,16 +22,16 @@ Agent Telegram ini memakai Gemini sebagai model utama dan bisa memanggil tool un
 
 - Python 3.11+
 - `python-telegram-bot`
-- Gemini API via REST
+- Gemini via LangChain
 - Notion API via REST
 - Google Calendar API via service account
 - Playwright untuk browsing halaman
+- Obsidian RAG via ChromaDB + sentence-transformers
 - Reminder terjadwal kontekstual ke Telegram dengan fallback alarm webhook
 - Dynamic nagging untuk tugas mendekati deadline
 - Natural language input untuk bikin reminder/jadwal dari chat biasa
 - Morning briefing harian ke Telegram jam 06:00
 - Chain reminders Telegram setelah event tertentu selesai
-- Daily auto-task list lokal untuk habit berulang seperti Duolingo dan Hack The Box
 
 ## Setup
 
@@ -52,9 +54,19 @@ cp .env.example .env
 
 - Telegram: buat bot di BotFather dan ambil token
 - Gemini: buat API key di Google AI Studio
+- Obsidian: set `OBSIDIAN_VAULT_PATH` ke path absolut vault kamu
 - Notion: buat internal integration, share page target ke integration itu
 - Google Calendar dan Google Docs: buat service account, aktifkan Google Calendar API dan Google Docs API, lalu share resource target ke email service account
 - Reminder target chat: chat dulu ke bot lalu pakai command `/chat_id` untuk ambil `REMINDER_TELEGRAM_CHAT_ID`
+
+### Environment variables yang wajib diperiksa
+
+- `GOOGLE_API_KEY` untuk Gemini
+- `TELEGRAM_BOT_TOKEN` untuk bot Telegram
+- `OBSIDIAN_VAULT_PATH` untuk vault Obsidian
+- `GOOGLE_CREDENTIALS_PATH` untuk service account Google Calendar/Docs
+- `GOOGLE_CALENDAR_ID` untuk kalender target
+- `GOOGLE_DOCS_DOCUMENT_ID` untuk Google Docs context store
 
 Detail penting untuk Google Calendar:
 
@@ -82,6 +94,28 @@ Maka `GOOGLE_DOCS_DOCUMENT_ID` adalah:
 ```text
 1AbCdEfGhIjKlMnOpQrStUvWxYz1234567890
 ```
+
+## Obsidian
+
+Obsidian RAG dan writer membaca path vault dari environment, bukan hardcoded string.
+
+Env yang dipakai:
+
+```bash
+OBSIDIAN_VAULT_PATH=/absolute/path/to/your/obsidian/vault
+OBSIDIAN_CHROMA_DB_PATH=./chroma_db
+```
+
+Perintah manual:
+
+- `/reindex` untuk rebuild index vector Obsidian
+- `search_obsidian` dipakai agent saat user bertanya soal catatan pribadi
+- `write_obsidian_note` dipakai agent saat user ingin simpan note atau daily journal
+
+Perilaku penting:
+
+- Catatan baru dan update daily journal langsung ikut di-upsert ke index vector
+- Kalau vault diubah manual di luar bot, jalankan `/reindex` supaya index sinkron lagi
 
 ## Menjalankan
 
@@ -137,7 +171,7 @@ DYNAMIC_NAGGING_MAX_REMINDERS=3
 
 Provider yang didukung sekarang:
 
-- Local task list bawaan di `var/task_list.json`. Ini dipakai juga buat auto-task harian seperti `Duolingo` dan `Hack The Box`.
+<!-- - Local task list bawaan di `var/task_list.json`. Ini dipakai juga buat auto-task harian seperti `Duolingo` dan `Hack The Box`. -->
 - Notion database: isi `NOTION_TASK_DATABASE_ID` lalu map nama property title, status, deadline, dan progress sesuai database kamu.
 - Todoist: isi `TODOIST_API_TOKEN`.
 - Google Tasks: isi `GOOGLE_TASKS_TASKLIST_ID`, lalu pakai service account yang memang punya akses ke tasklist itu. Kalau perlu domain-wide delegation, isi juga `GOOGLE_TASKS_IMPERSONATE_USER`.
@@ -151,14 +185,14 @@ Perilaku nagging:
 
 ## Daily Auto Task List
 
-Bot sekarang bisa bikin task harian otomatis tanpa perlu diminta dulu. Default-nya setiap tanggal baru akan menambahkan:
+<!-- Bot sekarang bisa bikin task harian otomatis tanpa perlu diminta dulu. Default-nya setiap tanggal baru akan menambahkan:
 
 - `Duolingo`
 - `Hack The Box`
 
-Task ini disimpan ke task list lokal di `var/task_list.json`, lalu otomatis ikut kebaca oleh `morning briefing` dan `dynamic nagging` kalau sumber task memakai mode `auto`.
+Task ini disimpan ke task list lokal di `var/task_list.json`, lalu otomatis ikut kebaca oleh `morning briefing` dan `dynamic nagging` kalau sumber task memakai mode `auto`. -->
 
-Env tambahan:
+<!-- Env tambahan:
 
 ```bash
 DAILY_TASK_LIST_ENABLED=true
@@ -166,11 +200,11 @@ DAILY_TASK_TEMPLATES=Duolingo,Hack The Box
 DAILY_TASK_DUE_HOUR=20
 DAILY_TASK_DUE_MINUTE=0
 LOCAL_TASK_STORE_FILE=var/task_list.json
-```
+``` -->
 
 Catatan:
 
-- Pembuatan task dijaga idempoten, jadi `Duolingo` dan `Hack The Box` tidak akan dobel di hari yang sama.
+- Pembuatan task dijaga idempoten, jadi tidak akan dobel di hari yang sama.
 - File task lokal otomatis dipangkas untuk item lama, jadi store-nya tidak terus membengkak.
 
 ## Natural Language Input

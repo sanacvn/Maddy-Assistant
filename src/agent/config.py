@@ -120,13 +120,14 @@ class Settings:
         )
         return cls(
             telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
-            gemini_api_key=os.environ["GEMINI_API_KEY"],
+            gemini_api_key=os.getenv("GOOGLE_API_KEY") or os.environ["GEMINI_API_KEY"],
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
             notion_api_key=os.getenv("NOTION_API_KEY"),
             notion_version=os.getenv("NOTION_VERSION", "2022-06-28"),
             notion_parent_page_id=os.getenv("NOTION_PARENT_PAGE_ID"),
             google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "your_calendar@gmail.com"),
-            google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
+            google_service_account_file=os.getenv("GOOGLE_CREDENTIALS_PATH")
+            or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"),
             google_docs_document_id=os.getenv("GOOGLE_DOCS_DOCUMENT_ID"),
             google_docs_context_auto_sync=os.getenv(
                 "GOOGLE_DOCS_CONTEXT_AUTO_SYNC",

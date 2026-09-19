@@ -30,33 +30,33 @@ class ToolRegistry:
 
     def get_function_declarations(self) -> list[dict[str, Any]]:
         return [
-            {
-                "name": "notion_search",
-                "description": "Search pages in Notion by a text query.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "query": {"type": "STRING", "description": "Search query for Notion content."}
-                    },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "notion_create_page",
-                "description": "Create a Notion page under a parent page with plain text content.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "title": {"type": "STRING"},
-                        "content": {"type": "STRING"},
-                        "parent_page_id": {
-                            "type": "STRING",
-                            "description": "Optional Notion parent page ID. Defaults to NOTION_PARENT_PAGE_ID."
-                        },
-                    },
-                    "required": ["title", "content"],
-                },
-            },
+            # {
+            #     "name": "notion_search",
+            #     "description": "Search pages in Notion by a text query.",
+            #     "parameters": {
+            #         "type": "OBJECT",
+            #         "properties": {
+            #             "query": {"type": "STRING", "description": "Search query for Notion content."}
+            #         },
+            #         "required": ["query"],
+            #     },
+            # },
+            # {
+            #     "name": "notion_create_page",
+            #     "description": "Create a Notion page under a parent page with plain text content.",
+            #     "parameters": {
+            #         "type": "OBJECT",
+            #         "properties": {
+            #             "title": {"type": "STRING"},
+            #             "content": {"type": "STRING"},
+            #             "parent_page_id": {
+            #                 "type": "STRING",
+            #                 "description": "Optional Notion parent page ID. Defaults to NOTION_PARENT_PAGE_ID."
+            #             },
+            #         },
+            #         "required": ["title", "content"],
+            #     },
+            # },
             {
                 "name": "calendar_list_events",
                 "description": "List events from Google Calendar in a time range.",
@@ -180,8 +180,8 @@ class ToolRegistry:
 
     async def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         handlers = {
-            "notion_search": self.notion_search,
-            "notion_create_page": self.notion_create_page,
+            # "notion_search": self.notion_search,
+            # "notion_create_page": self.notion_create_page,
             "calendar_list_events": self.calendar_list_events,
             "calendar_create_event": self.calendar_create_event,
             "calendar_check_setup": self.calendar_check_setup,
@@ -216,8 +216,8 @@ class ToolRegistry:
             try:
                 if provider == "local":
                     tasks.extend(await self._local_list_urgent_tasks(now, deadline_before))
-                elif provider == "notion":
-                    tasks.extend(await self._notion_list_urgent_tasks(now, deadline_before))
+                # elif provider == "notion":
+                #     tasks.extend(await self._notion_list_urgent_tasks(now, deadline_before))
                 elif provider == "todoist":
                     tasks.extend(await self._todoist_list_urgent_tasks(now, deadline_before))
                 elif provider == "google_tasks":
@@ -229,169 +229,169 @@ class ToolRegistry:
         return tasks
 
     async def ensure_daily_tasks(self, now: datetime | None = None) -> list[dict[str, Any]]:
-        if not self.settings.daily_task_list_enabled or not self.settings.daily_task_templates:
-            return []
+        # if not self.settings.daily_task_list_enabled or not self.settings.daily_task_templates:
+        #     return []
 
         current = now.astimezone(self._timezone) if now else datetime.now(self._timezone)
         due_at = current.replace(
             hour=self.settings.daily_task_due_hour,
             minute=self.settings.daily_task_due_minute,
-            second=0,
+            second=0,   
             microsecond=0,
         )
-        created: list[dict[str, Any]] = []
+        # created: list[dict[str, Any]] = []
 
-        async with self._local_task_lock:
-            items = self._load_local_tasks_unlocked()
-            pruned_items = self._prune_local_tasks(items, current)
-            changed = len(pruned_items) != len(items)
-            items = pruned_items
-            existing_keys = {
-                identity
-                for identity in (self._local_task_identity(item) for item in items)
-                if identity
-            }
+        # async with self._local_task_lock:
+        #     items = self._load_local_tasks_unlocked()
+        #     pruned_items = self._prune_local_tasks(items, current)
+        #     changed = len(pruned_items) != len(items)
+        #     items = pruned_items
+        #     existing_keys = {
+        #         identity
+        #         for identity in (self._local_task_identity(item) for item in items)
+        #         if identity
+        #     }
 
-            for title in self.settings.daily_task_templates:
-                daily_key = self._daily_task_key(current, title)
-                if daily_key in existing_keys:
-                    continue
+        #     for title in self.settings.daily_task_templates:
+        #         daily_key = self._daily_task_key(current, title)
+        #         if daily_key in existing_keys:
+        #             continue
 
-                item = {
-                    "id": daily_key,
-                    "title": title,
-                    "due": due_at.isoformat(),
-                    "status": "needsAction",
-                    "notes": "Auto-generated daily task.",
-                    "daily_key": daily_key,
-                    "created_at": current.isoformat(),
-                }
-                items.append(item)
-                existing_keys.add(daily_key)
-                changed = True
-                created.append(
-                    {
-                        "task_key": f"local:{daily_key}",
-                        "source": "local",
-                        "task_id": daily_key,
-                        "task_name": title,
-                        "deadline_at": due_at,
-                        "progress": item["notes"],
-                        "status": item["status"],
-                        "url": None,
-                    }
-                )
+        #         item = {
+        #             "id": daily_key,
+        #             "title": title,
+        #             "due": due_at.isoformat(),
+        #             "status": "needsAction",
+        #             "notes": "Auto-generated daily task.",
+        #             "daily_key": daily_key,
+        #             "created_at": current.isoformat(),
+        #         }
+        #         items.append(item)
+        #         existing_keys.add(daily_key)
+        #         changed = True
+        #         created.append(
+        #             {
+        #                 "task_key": f"local:{daily_key}",
+        #                 "source": "local",
+        #                 "task_id": daily_key,
+        #                 "task_name": title,
+        #                 "deadline_at": due_at,
+        #                 "progress": item["notes"],
+        #                 "status": item["status"],
+        #                 "url": None,
+        #             }
+        #         )
 
-            if changed:
-                self._save_local_tasks_unlocked(items)
+        #     if changed:
+        #         self._save_local_tasks_unlocked(items)
 
-        return created
+        # return created
 
-    async def notion_search(self, query: str) -> dict[str, Any]:
-        if not self.settings.notion_api_key:
-            return {"error": "NOTION_API_KEY is not configured."}
+    # async def notion_search(self, query: str) -> dict[str, Any]:
+    #     if not self.settings.notion_api_key:
+    #         return {"error": "NOTION_API_KEY is not configured."}
 
-        headers = self._notion_headers()
-        payload = {"query": query, "page_size": 5}
+    #     headers = self._notion_headers()
+    #     payload = {"query": query, "page_size": 5}
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.notion.com/v1/search",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+    #     async with httpx.AsyncClient(timeout=30) as client:
+    #         response = await client.post(
+    #             "https://api.notion.com/v1/search",
+    #             headers=headers,
+    #             json=payload,
+    #         )
+    #         response.raise_for_status()
+    #         data = response.json()
 
-        results = []
-        for item in data.get("results", []):
-            title = self._extract_notion_title(item)
-            results.append(
-                {
-                    "id": item.get("id"),
-                    "url": item.get("url"),
-                    "object": item.get("object"),
-                    "title": title,
-                }
-            )
-        return {"results": results}
+    #     results = []
+    #     for item in data.get("results", []):
+    #         title = self._extract_notion_title(item)
+    #         results.append(
+    #             {
+    #                 "id": item.get("id"),
+    #                 "url": item.get("url"),
+    #                 "object": item.get("object"),
+    #                 "title": title,
+    #             }
+    #         )
+    #     return {"results": results}
 
-    async def notion_extract_task_context(self, task_name: str) -> dict[str, Any]:
-        search_result = await self.notion_search(task_name)
-        if search_result.get("error"):
-            return {}
+    # async def notion_extract_task_context(self, task_name: str) -> dict[str, Any]:
+    #     search_result = await self.notion_search(task_name)
+    #     if search_result.get("error"):
+    #         return {}
 
-        results = search_result.get("results", [])
-        if not results:
-            return {}
+    #     results = search_result.get("results", [])
+    #     if not results:
+    #         return {}
 
-        page = self._pick_best_notion_result(task_name, results)
-        page_id = page.get("id")
-        if not page_id:
-            return {}
+    #     page = self._pick_best_notion_result(task_name, results)
+    #     page_id = page.get("id")
+    #     if not page_id:
+    #         return {}
 
-        lines = await self._notion_page_lines(page_id)
-        context, target = self._extract_context_and_target(lines)
-        return {
-            "page_id": page_id,
-            "page_title": page.get("title"),
-            "page_url": page.get("url"),
-            "context": context,
-            "target": target,
-        }
+    #     lines = await self._notion_page_lines(page_id)
+    #     context, target = self._extract_context_and_target(lines)
+    #     return {
+    #         "page_id": page_id,
+    #         "page_title": page.get("title"),
+    #         "page_url": page.get("url"),
+    #         "context": context,
+    #         "target": target,
+    #     }
 
-    async def notion_create_page(
-        self,
-        title: str,
-        content: str,
-        parent_page_id: str | None = None,
-    ) -> dict[str, Any]:
-        if not self.settings.notion_api_key:
-            return {"error": "NOTION_API_KEY is not configured."}
+    # async def notion_create_page(
+    #     self,
+    #     title: str,
+    #     content: str,
+    #     parent_page_id: str | None = None,
+    # ) -> dict[str, Any]:
+    #     if not self.settings.notion_api_key:
+    #         return {"error": "NOTION_API_KEY is not configured."}
 
-        parent_id = parent_page_id or self.settings.notion_parent_page_id
-        if not parent_id:
-            return {"error": "Missing parent_page_id and NOTION_PARENT_PAGE_ID is not configured."}
+    #     parent_id = parent_page_id or self.settings.notion_parent_page_id
+    #     if not parent_id:
+    #         return {"error": "Missing parent_page_id and NOTION_PARENT_PAGE_ID is not configured."}
 
-        headers = self._notion_headers()
-        payload = {
-            "parent": {"type": "page_id", "page_id": parent_id},
-            "properties": {
-                "title": {
-                    "title": [
-                        {
-                            "type": "text",
-                            "text": {"content": title},
-                        }
-                    ]
-                }
-            },
-            "children": [
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": content[:1800]},
-                            }
-                        ]
-                    },
-                }
-            ],
-        }
+    #     headers = self._notion_headers()
+    #     payload = {
+    #         "parent": {"type": "page_id", "page_id": parent_id},
+    #         "properties": {
+    #             "title": {
+    #                 "title": [
+    #                     {
+    #                         "type": "text",
+    #                         "text": {"content": title},
+    #                     }
+    #                 ]
+    #             }
+    #         },
+    #         "children": [
+    #             {
+    #                 "object": "block",
+    #                 "type": "paragraph",
+    #                 "paragraph": {
+    #                     "rich_text": [
+    #                         {
+    #                             "type": "text",
+    #                             "text": {"content": content[:1800]},
+    #                         }
+    #                     ]
+    #                 },
+    #             }
+    #         ],
+    #     }
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+    #     async with httpx.AsyncClient(timeout=30) as client:
+    #         response = await client.post(
+    #             "https://api.notion.com/v1/pages",
+    #             headers=headers,
+    #             json=payload,
+    #         )
+    #         response.raise_for_status()
+    #         data = response.json()
 
-        return {"id": data.get("id"), "url": data.get("url"), "title": title}
+    #     return {"id": data.get("id"), "url": data.get("url"), "title": title}
 
     async def calendar_list_events(self, start_iso: str, end_iso: str) -> dict[str, Any]:
         service = self._calendar_service()
@@ -455,7 +455,10 @@ class ToolRegistry:
     async def calendar_check_setup(self) -> dict[str, Any]:
         service_account_file = self.settings.google_service_account_file
         if not service_account_file:
-            return {"ok": False, "error": "GOOGLE_SERVICE_ACCOUNT_FILE is not configured."}
+            return {
+                "ok": False,
+                "error": "GOOGLE_CREDENTIALS_PATH / GOOGLE_SERVICE_ACCOUNT_FILE is not configured.",
+            }
 
         file_path = Path(service_account_file)
         if not file_path.exists():
@@ -630,7 +633,10 @@ class ToolRegistry:
     async def google_docs_check_setup(self, document_id: str | None = None) -> dict[str, Any]:
         service_account_file = self.settings.google_service_account_file
         if not service_account_file:
-            return {"ok": False, "error": "GOOGLE_SERVICE_ACCOUNT_FILE is not configured."}
+            return {
+                "ok": False,
+                "error": "GOOGLE_CREDENTIALS_PATH / GOOGLE_SERVICE_ACCOUNT_FILE is not configured.",
+            }
 
         file_path = Path(service_account_file)
         if not file_path.exists():
@@ -720,7 +726,9 @@ class ToolRegistry:
 
     def _calendar_service(self):
         if not self.settings.google_service_account_file:
-            raise ValueError("GOOGLE_SERVICE_ACCOUNT_FILE is not configured.")
+            raise ValueError(
+                "GOOGLE_CREDENTIALS_PATH / GOOGLE_SERVICE_ACCOUNT_FILE is not configured."
+            )
 
         credentials = service_account.Credentials.from_service_account_file(
             self.settings.google_service_account_file,
@@ -774,7 +782,9 @@ class ToolRegistry:
 
     def _google_docs_service(self, readonly: bool):
         if not self.settings.google_service_account_file:
-            raise ValueError("GOOGLE_SERVICE_ACCOUNT_FILE is not configured.")
+            raise ValueError(
+                "GOOGLE_CREDENTIALS_PATH / GOOGLE_SERVICE_ACCOUNT_FILE is not configured."
+            )
 
         scope = (
             "https://www.googleapis.com/auth/documents.readonly"
@@ -911,10 +921,10 @@ class ToolRegistry:
     def _enabled_task_providers(self) -> list[str]:
         source = self.settings.dynamic_nagging_source
         providers: list[str] = []
-        if source in {"auto", "local"} and (
-            self.settings.daily_task_list_enabled or self._local_task_store_path().exists()
-        ):
-            providers.append("local")
+        # if source in {"auto", "local"} and (
+        #     self.settings.daily_task_list_enabled or self._local_task_store_path().exists()
+        # ):
+            # providers.append("local")
         if source in {"auto", "notion"} and self.settings.notion_api_key and self.settings.notion_task_database_id:
             providers.append("notion")
         if source in {"auto", "todoist"} and self.settings.todoist_api_token:
@@ -955,70 +965,70 @@ class ToolRegistry:
             )
         return tasks
 
-    async def _notion_list_urgent_tasks(
-        self,
-        now: datetime,
-        deadline_before: datetime,
-    ) -> list[dict[str, Any]]:
-        database_id = self.settings.notion_task_database_id
-        if not database_id or not self.settings.notion_api_key:
-            return []
+    # async def _notion_list_urgent_tasks(
+    #     self,
+    #     now: datetime,
+    #     deadline_before: datetime,
+    # ) -> list[dict[str, Any]]:
+    #     database_id = self.settings.notion_task_database_id
+    #     if not database_id or not self.settings.notion_api_key:
+    #         return []
 
-        payload = {
-            "page_size": 20,
-            "filter": {
-                "property": self.settings.notion_task_deadline_property,
-                "date": {"on_or_before": deadline_before.isoformat()},
-            },
-            "sorts": [
-                {
-                    "property": self.settings.notion_task_deadline_property,
-                    "direction": "ascending",
-                }
-            ],
-        }
+    #     payload = {
+    #         "page_size": 20,
+    #         "filter": {
+    #             "property": self.settings.notion_task_deadline_property,
+    #             "date": {"on_or_before": deadline_before.isoformat()},
+    #         },
+    #         "sorts": [
+    #             {
+    #                 "property": self.settings.notion_task_deadline_property,
+    #                 "direction": "ascending",
+    #             }
+    #         ],
+    #     }
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"https://api.notion.com/v1/databases/{database_id}/query",
-                headers=self._notion_headers(),
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+    #     async with httpx.AsyncClient(timeout=30) as client:
+    #         response = await client.post(
+    #             f"https://api.notion.com/v1/databases/{database_id}/query",
+    #             headers=self._notion_headers(),
+    #             json=payload,
+    #         )
+    #         response.raise_for_status()
+    #         data = response.json()
 
-        tasks = []
-        for item in data.get("results", []):
-            properties = item.get("properties", {})
-            deadline_at = self._notion_property_datetime(
-                properties.get(self.settings.notion_task_deadline_property),
-            )
-            if not deadline_at or deadline_at > deadline_before or deadline_at < now - timedelta(hours=1):
-                continue
+    #     tasks = []
+    #     for item in data.get("results", []):
+    #         properties = item.get("properties", {})
+    #         deadline_at = self._notion_property_datetime(
+    #             properties.get(self.settings.notion_task_deadline_property),
+    #         )
+    #         if not deadline_at or deadline_at > deadline_before or deadline_at < now - timedelta(hours=1):
+    #             continue
 
-            status = self._notion_property_text(properties.get(self.settings.notion_task_status_property))
-            if status and status.lower() in self.settings.notion_task_done_values:
-                continue
+    #         status = self._notion_property_text(properties.get(self.settings.notion_task_status_property))
+    #         if status and status.lower() in self.settings.notion_task_done_values:
+    #             continue
 
-            title = self._notion_property_title(
-                properties.get(self.settings.notion_task_title_property)
-            ) or self._extract_notion_title(item)
-            progress = self._notion_property_text(
-                properties.get(self.settings.notion_task_progress_property)
-            )
-            tasks.append(
-                {
-                    "task_key": f"notion:{item.get('id')}",
-                    "source": "notion",
-                    "task_id": item.get("id"),
-                    "task_name": title or "Untitled task",
-                    "deadline_at": deadline_at,
-                    "progress": progress,
-                    "status": status,
-                    "url": item.get("url"),
-                }
-            )
-        return tasks
+    #         title = self._notion_property_title(
+    #             properties.get(self.settings.notion_task_title_property)
+    #         ) or self._extract_notion_title(item)
+    #         progress = self._notion_property_text(
+    #             properties.get(self.settings.notion_task_progress_property)
+    #         )
+    #         tasks.append(
+    #             {
+    #                 "task_key": f"notion:{item.get('id')}",
+    #                 "source": "notion",
+    #                 "task_id": item.get("id"),
+    #                 "task_name": title or "Untitled task",
+    #                 "deadline_at": deadline_at,
+    #                 "progress": progress,
+    #                 "status": status,
+    #                 "url": item.get("url"),
+    #             }
+    #         )
+    #     return tasks
 
     async def _todoist_list_urgent_tasks(
         self,
@@ -1098,53 +1108,53 @@ class ToolRegistry:
             )
         return tasks
 
-    def _notion_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.settings.notion_api_key}",
-            "Notion-Version": self.settings.notion_version,
-            "Content-Type": "application/json",
-        }
+    # def _notion_headers(self) -> dict[str, str]:
+    #     return {
+    #         "Authorization": f"Bearer {self.settings.notion_api_key}",
+    #         "Notion-Version": self.settings.notion_version,
+    #         "Content-Type": "application/json",
+    #     }
 
-    async def _notion_page_lines(self, page_id: str) -> list[str]:
-        if not self.settings.notion_api_key:
-            return []
+    # async def _notion_page_lines(self, page_id: str) -> list[str]:
+    #     if not self.settings.notion_api_key:
+    #         return []
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                f"https://api.notion.com/v1/blocks/{page_id}/children",
-                headers=self._notion_headers(),
-                params={"page_size": 20},
-            )
-            response.raise_for_status()
-            data = response.json()
+    #     async with httpx.AsyncClient(timeout=30) as client:
+    #         response = await client.get(
+    #             f"https://api.notion.com/v1/blocks/{page_id}/children",
+    #             headers=self._notion_headers(),
+    #             params={"page_size": 20},
+    #         )
+    #         response.raise_for_status()
+    #         data = response.json()
 
-        lines: list[str] = []
-        for block in data.get("results", []):
-            block_type = block.get("type")
-            if not block_type:
-                continue
-            block_data = block.get(block_type, {})
-            rich_text = block_data.get("rich_text", [])
-            text = "".join(part.get("plain_text", "") for part in rich_text).strip()
-            if text:
-                lines.append(text)
-        return lines
+    #     lines: list[str] = []
+    #     for block in data.get("results", []):
+    #         block_type = block.get("type")
+    #         if not block_type:
+    #             continue
+    #         block_data = block.get(block_type, {})
+    #         rich_text = block_data.get("rich_text", [])
+    #         text = "".join(part.get("plain_text", "") for part in rich_text).strip()
+    #         if text:
+    #             lines.append(text)
+    #     return lines
 
-    @staticmethod
-    def _pick_best_notion_result(task_name: str, results: list[dict[str, Any]]) -> dict[str, Any]:
-        query = task_name.strip().lower()
+    # @staticmethod
+    # def _pick_best_notion_result(task_name: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    #     query = task_name.strip().lower()
 
-        def score(item: dict[str, Any]) -> tuple[int, int]:
-            title = (item.get("title") or "").strip().lower()
-            if title == query:
-                return (3, len(title))
-            if query and query in title:
-                return (2, len(title))
-            if title and title in query:
-                return (1, len(title))
-            return (0, len(title))
+    #     def score(item: dict[str, Any]) -> tuple[int, int]:
+    #         title = (item.get("title") or "").strip().lower()
+    #         if title == query:
+    #             return (3, len(title))
+    #         if query and query in title:
+    #             return (2, len(title))
+    #         if title and title in query:
+    #             return (1, len(title))
+    #         return (0, len(title))
 
-        return max(results, key=score)
+    #     return max(results, key=score)
 
     @staticmethod
     def _extract_context_and_target(lines: list[str]) -> tuple[str | None, str | None]:
@@ -1229,19 +1239,19 @@ class ToolRegistry:
     def _normalize_task_name(name: str) -> str:
         return " ".join(name.lower().split())
 
-    def _daily_task_key(self, current: datetime, title: str) -> str:
-        return f"{current.date().isoformat()}::{self._normalize_task_name(title)}"
+    # def _daily_task_key(self, current: datetime, title: str) -> str:
+    #     return f"{current.date().isoformat()}::{self._normalize_task_name(title)}"
 
-    def _local_task_identity(self, item: dict[str, Any]) -> str | None:
-        daily_key = item.get("daily_key")
-        if isinstance(daily_key, str) and daily_key.strip():
-            return daily_key.strip()
+    # def _local_task_identity(self, item: dict[str, Any]) -> str | None:
+    #     daily_key = item.get("daily_key")
+    #     if isinstance(daily_key, str) and daily_key.strip():
+    #         return daily_key.strip()
 
-        title = str(item.get("title") or "").strip()
-        due = self._parse_datetime(item.get("due"))
-        if not title or not due:
-            return None
-        return f"{due.date().isoformat()}::{self._normalize_task_name(title)}"
+    #     title = str(item.get("title") or "").strip()
+    #     due = self._parse_datetime(item.get("due"))
+    #     if not title or not due:
+    #         return None
+    #     return f"{due.date().isoformat()}::{self._normalize_task_name(title)}"
 
     def _prune_local_tasks(
         self,
@@ -1269,44 +1279,44 @@ class ToolRegistry:
             return parsed.replace(tzinfo=ZoneInfo(self.settings.timezone))
         return parsed.astimezone(ZoneInfo(self.settings.timezone))
 
-    def _notion_property_datetime(self, prop: dict[str, Any] | None) -> datetime | None:
-        if not prop:
-            return None
-        if prop.get("type") == "date":
-            return self._parse_datetime((prop.get("date") or {}).get("start"))
-        return None
+    # def _notion_property_datetime(self, prop: dict[str, Any] | None) -> datetime | None:
+    #     if not prop:
+    #         return None
+    #     if prop.get("type") == "date":
+    #         return self._parse_datetime((prop.get("date") or {}).get("start"))
+    #     return None
 
-    @staticmethod
-    def _notion_property_title(prop: dict[str, Any] | None) -> str:
-        if not prop:
-            return ""
-        if prop.get("type") != "title":
-            return ""
-        return "".join(part.get("plain_text", "") for part in prop.get("title", []))
+    # @staticmethod
+    # def _notion_property_title(prop: dict[str, Any] | None) -> str:
+    #     if not prop:
+    #         return ""
+    #     if prop.get("type") != "title":
+    #         return ""
+    #     return "".join(part.get("plain_text", "") for part in prop.get("title", []))
 
-    @staticmethod
-    def _notion_property_text(prop: dict[str, Any] | None) -> str:
-        if not prop:
-            return ""
-        prop_type = prop.get("type")
-        if prop_type == "status":
-            return (prop.get("status") or {}).get("name", "")
-        if prop_type == "select":
-            return (prop.get("select") or {}).get("name", "")
-        if prop_type == "multi_select":
-            return ", ".join(item.get("name", "") for item in prop.get("multi_select", []))
-        if prop_type == "rich_text":
-            return "".join(part.get("plain_text", "") for part in prop.get("rich_text", []))
-        if prop_type == "number":
-            value = prop.get("number")
-            return "" if value is None else str(value)
-        if prop_type == "checkbox":
-            return "done" if prop.get("checkbox") else ""
-        if prop_type == "formula":
-            formula = prop.get("formula") or {}
-            value = formula.get(formula.get("type"))
-            return "" if value is None else str(value)
-        return ""
+    # @staticmethod
+    # def _notion_property_text(prop: dict[str, Any] | None) -> str:
+    #     if not prop:
+    #         return ""
+    #     prop_type = prop.get("type")
+    #     if prop_type == "status":
+    #         return (prop.get("status") or {}).get("name", "")
+    #     if prop_type == "select":
+    #         return (prop.get("select") or {}).get("name", "")
+    #     if prop_type == "multi_select":
+    #         return ", ".join(item.get("name", "") for item in prop.get("multi_select", []))
+    #     if prop_type == "rich_text":
+    #         return "".join(part.get("plain_text", "") for part in prop.get("rich_text", []))
+    #     if prop_type == "number":
+    #         value = prop.get("number")
+    #         return "" if value is None else str(value)
+    #     if prop_type == "checkbox":
+    #         return "done" if prop.get("checkbox") else ""
+    #     if prop_type == "formula":
+    #         formula = prop.get("formula") or {}
+    #         value = formula.get(formula.get("type"))
+    #         return "" if value is None else str(value)
+    #     return ""
 
     @staticmethod
     def _todoist_due_to_datetime(due: dict[str, Any], tzinfo) -> datetime | None:

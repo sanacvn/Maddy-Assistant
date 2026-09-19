@@ -1,326 +1,71 @@
 from __future__ import annotations
-
-import asyncio
-import logging
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
-import httpx
+from langchain_core.messages import AIMessage, HumanMessage
+
+from agent import agent_executor
 
 from .config import Settings
 from .tools import ToolRegistry
-
-
-logger = logging.getLogger(__name__)
-
-
-DEFAULT_GOOGLE_DOCS_CONTEXT_TEMPLATE = """Agent Context Store
-
-Identity & Preferences
-- 
-
-Current Priorities
-- 
-
-Open Loops
-- 
-
-Recent Decisions
-- 
-
-Memory Log
-- Context document initialized.
-"""
-
-
-class UpstreamServiceError(Exception):
-    pass
 
 
 class GeminiTelegramAgent:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.tools = ToolRegistry(settings)
-        self.histories: dict[int, list[dict[str, Any]]] = {}
-        self._google_docs_template_initialized = False
-        self.base_system_instruction = (
-            "You are a practical AI assistant inside Telegram. "
-            "Use tools whenever the user asks about Notion, Google Docs, calendar, time, or up-to-date web information. "
-            "Before creating events or Notion pages, infer missing details from context when safe, otherwise ask a short follow-up. "
-            "For calendar requests, if the user gives an exact date, exact time, or time range, preserve it exactly. "
-            "Do not invent or shift hours. If the time is ambiguous or missing, ask a short clarification before creating the event. "
-            "Respond in the user's language. "
-            "Default tone: casual, confident, playful, and not stiff. "
-            "Keep replies relatively short, use natural Indonesian slang when the user is casual, and avoid formal corporate phrasing. "
-            "Do not be overly polite or do unnecessary small talk. "
-            "Skip greetings, filler, and softening phrases unless the user explicitly wants them. "
-            "Lead with the point, not pleasantries. "
-            "If the topic is high-stakes, sensitive, or needs precision, keep the tone calmer and clearer."
-        )
+        self.histories: dict[int, list[Any]] = {}
 
     async def respond(self, chat_id: int, user_text: str) -> str:
         history = self.histories.setdefault(chat_id, [])
-        user_turn = {
-            "role": "user",
-            "parts": [{"text": user_text}],
-        }
-        history.append(user_turn)
-        self._trim_history(history)
-        persistent_context = await self._load_persistent_context()
-        system_instruction = self._build_system_instruction(persistent_context)
-
-        for attempt in range(2):
-            try:
-                return await self._run_conversation(history, system_instruction)
-            except UpstreamServiceError:
-                return (
-                    "Layanan Gemini sedang bermasalah sementara. "
-                    "Coba kirim lagi dalam beberapa detik."
-                )
-            except httpx.HTTPStatusError as exc:
-                if attempt == 0 and self._is_turn_sequence_error(exc):
-                    logger.warning(
-                        "Resetting corrupted chat history chat_id=%s after Gemini turn sequence error",
-                        chat_id,
-                    )
-                    history[:] = [user_turn]
-                    continue
-                raise
-
-        return "Saya tidak bisa menyelesaikan permintaan itu setelah beberapa langkah tool call."
+        result = await agent_executor.ainvoke(
+            {
+                "input": user_text,
+                "chat_history": history,
+                "prefetched_context": "",
+            }
+        )
+        reply_text = self._extract_reply(result)
+        history.extend([HumanMessage(content=user_text), AIMessage(content=reply_text)])
+        if len(history) > 20:
+            del history[:-20]
+        return reply_text
 
     def reset_history(self, chat_id: int) -> None:
         self.histories.pop(chat_id, None)
 
-    async def _run_conversation(
-        self,
-        history: list[dict[str, Any]],
-        system_instruction: str,
-    ) -> str:
-        for _ in range(6):
-            response = await self._generate_content(history, system_instruction)
-            candidate = response["candidates"][0]["content"]
-            parts = candidate.get("parts", [])
-            history.append(candidate)
-
-            function_call = self._extract_function_call(parts)
-            if function_call:
-                tool_result = await self.tools.call(
-                    function_call["name"],
-                    function_call.get("args", {}),
-                )
-                history.append(
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": function_call["name"],
-                                    "response": tool_result,
-                                }
-                            }
-                        ],
-                    }
-                )
-                continue
-
-            text = self._extract_text(parts)
-            if text:
-                return text
-
-        return "Saya tidak bisa menyelesaikan permintaan itu setelah beberapa langkah tool call."
-
-    async def _generate_content(
-        self,
-        history: list[dict[str, Any]],
-        system_instruction: str,
-    ) -> dict[str, Any]:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.settings.gemini_model}:generateContent"
-        )
-        payload = {
-            "systemInstruction": {
-                "parts": [{"text": system_instruction}]
-            },
-            "contents": history,
-            "tools": [
-                {
-                    "functionDeclarations": self.tools.get_function_declarations(),
-                }
-            ],
-        }
-
-        async with httpx.AsyncClient(timeout=60) as client:
-            for attempt in range(3):
-                try:
-                    response = await client.post(
-                        url,
-                        params={"key": self.settings.gemini_api_key},
-                        json=payload,
-                    )
-                    if response.status_code in {429, 500, 502, 503, 504}:
-                        logger.warning(
-                            "Gemini upstream temporary failure: status=%s body=%s",
-                            response.status_code,
-                            response.text[:500],
-                        )
-                        if attempt < 2:
-                            await asyncio.sleep(1.5 * (attempt + 1))
-                            continue
-                        raise UpstreamServiceError(
-                            f"Gemini temporary failure: HTTP {response.status_code}"
-                        )
-
-                    response.raise_for_status()
-                    return response.json()
-                except httpx.TimeoutException as exc:
-                    logger.warning("Gemini request timed out on attempt %s", attempt + 1)
-                    if attempt < 2:
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                        continue
-                    raise UpstreamServiceError("Gemini request timed out") from exc
-                except httpx.HTTPStatusError as exc:
-                    status = exc.response.status_code
-                    body = exc.response.text[:500]
-                    logger.error("Gemini HTTP error: status=%s body=%s", status, body)
-                    if status in {429, 500, 502, 503, 504} and attempt < 2:
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                        continue
-                    raise
-
-        raise UpstreamServiceError("Gemini request failed after retries")
-
-    async def _load_persistent_context(self) -> str | None:
-        if (
-            not self.settings.google_docs_document_id
-            or not self.settings.google_docs_context_auto_sync
-        ):
-            return None
-
-        await self._ensure_google_docs_context_template()
-        result = await self.tools.google_docs_read(
-            max_chars=self.settings.google_docs_context_max_chars,
-        )
-        if not result.get("ok"):
-            logger.warning(
-                "Failed to load Google Docs persistent context: %s",
-                result.get("error"),
-            )
-            return None
-
-        content = str(result.get("content") or "").strip()
-        if not content:
-            return None
-        return content
-
-    async def _ensure_google_docs_context_template(self) -> None:
-        if (
-            self._google_docs_template_initialized
-            or not self.settings.google_docs_document_id
-            or not self.settings.google_docs_context_auto_sync
-        ):
-            return
-
-        read_result = await self.tools.google_docs_read(max_chars=1000)
-        if not read_result.get("ok"):
-            logger.warning(
-                "Failed to inspect Google Docs template state: %s",
-                read_result.get("error"),
-            )
-            return
-
-        current_content = str(read_result.get("content") or "").strip()
-        if current_content:
-            self._google_docs_template_initialized = True
-            return
-
-        timestamp = datetime.now(ZoneInfo(self.settings.timezone)).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-        template = DEFAULT_GOOGLE_DOCS_CONTEXT_TEMPLATE.replace(
-            "- Context document initialized.",
-            f"- [{timestamp} {self.settings.timezone}] Context document initialized.",
-        )
-        write_result = await self.tools.google_docs_replace(template)
-        if not write_result.get("ok"):
-            logger.warning(
-                "Failed to initialize Google Docs context template: %s",
-                write_result.get("error"),
-            )
-            return
-
-        self._google_docs_template_initialized = True
-
-    def _build_system_instruction(self, persistent_context: str | None) -> str:
-        now_text = datetime.now(ZoneInfo(self.settings.timezone)).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-        parts = [self.base_system_instruction]
-
-        if self.settings.google_docs_document_id and self.settings.google_docs_context_auto_sync:
-            parts.append(
-                "Persistent memory policy: "
-                "The configured Google Docs document is the bot's long-term memory and context store. "
-                "Use that memory proactively without waiting for the user to ask. "
-                "A current snapshot may be injected below; treat it as authoritative background context. "
-                "When the user reveals durable information that will matter later, you should update memory on your own before your final reply, usually with google_docs_append. "
-                "Durable information includes preferences, identity details, recurring constraints, ongoing projects, current priorities, explicit decisions, and open loops likely to matter in later chats. "
-                "Do not store secrets, passwords, tokens, OTPs, private credentials, or low-signal small talk. "
-                "Prefer google_docs_append for incremental memory updates. Use google_docs_replace only when the user explicitly asks to rewrite, reset, or reorganize the whole document. "
-                f"When writing memory notes, keep them concise and use this local timestamp format when helpful: [{now_text} {self.settings.timezone}] category: note. "
-                "Keep the document structure stable with these sections in order: Identity & Preferences, Current Priorities, Open Loops, Recent Decisions, Memory Log. "
-                "If the document already has content, preserve it rather than overwriting it."
-            )
-
-        if persistent_context:
-            parts.append(
-                "Current Google Docs memory snapshot:\n"
-                f"{persistent_context}"
-            )
-
-        return "\n\n".join(parts)
-
     @staticmethod
-    def _extract_function_call(parts: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for part in parts:
-            if "functionCall" in part:
-                function_call = part["functionCall"]
-                return {
-                    "name": function_call["name"],
-                    "args": function_call.get("args", {}),
-                }
+    def _extract_text(value: object) -> str | None:
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, dict):
+            for key in ("text", "content", "output", "answer", "result"):
+                extracted = GeminiTelegramAgent._extract_text(value.get(key))
+                if extracted:
+                    return extracted
+            return None
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                extracted = GeminiTelegramAgent._extract_text(item)
+                if extracted:
+                    return extracted
         return None
 
     @staticmethod
-    def _extract_text(parts: list[dict[str, Any]]) -> str:
-        chunks = [part.get("text", "") for part in parts if part.get("text")]
-        return "\n".join(chunks).strip()
-
-    @staticmethod
-    def _is_turn_sequence_error(exc: httpx.HTTPStatusError) -> bool:
-        if exc.response.status_code != 400:
-            return False
-        body = exc.response.text.lower()
-        return "function call turn" in body or "function response turn" in body
-
-    @staticmethod
-    def _is_plain_user_turn(turn: dict[str, Any]) -> bool:
-        if turn.get("role") != "user":
-            return False
-        for part in turn.get("parts", []):
-            if part.get("text"):
-                return True
-        return False
-
-    def _trim_history(self, history: list[dict[str, Any]], max_turns: int = 24) -> None:
-        if len(history) <= max_turns:
-            return
-
-        trimmed = history[-max_turns:]
-        while trimmed and not self._is_plain_user_turn(trimmed[0]):
-            trimmed.pop(0)
-
-        if trimmed:
-            history[:] = trimmed
+    def _extract_reply(result: object) -> str:
+        if isinstance(result, dict):
+            extracted = GeminiTelegramAgent._extract_text(
+                result.get("output")
+                or result.get("text")
+                or result.get("content")
+                or result.get("output_text")
+            )
+            if extracted:
+                return extracted
+            return str(result)
+        if isinstance(result, str):
+            return result
+        extracted = GeminiTelegramAgent._extract_text(result)
+        if extracted:
+            return extracted
+        return str(result)

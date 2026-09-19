@@ -20,17 +20,17 @@ class DailyTaskService:
         self._last_ensured_date: date | None = None
         self._timezone = ZoneInfo(settings.timezone)
 
-    async def start(self) -> None:
-        if (
-            self._task
-            or not self.settings.daily_task_list_enabled
-            or not self.settings.daily_task_templates
-        ):
-            return
+    # async def start(self) -> None:
+    #     # if (
+    #     #     self._task
+    #     #     or not self.settings.daily_task_list_enabled
+    #     #     or not self.settings.daily_task_templates
+    #     # ):
+    #     #     return
 
-        await self._ensure_for_today()
-        self._task = asyncio.create_task(self._run_loop(), name="daily-task-loop")
-        logger.info("Daily task loop started")
+    #     await self._ensure_for_today()
+    #     self._task = asyncio.create_task(self._run_loop(), name="daily-task-loop")
+    #     logger.info("Daily task loop started")
 
     async def stop(self) -> None:
         if not self._task:
